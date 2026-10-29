@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>小說閱讀</title>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);--bg:#fdf8f0;--card:#fff;--ink:#3b3228;--sub:#8a7d6e;--line:#eadfce;--accent:#e08a4b;--ok:#6aa76a}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,"PingFang TC","Noto Sans TC","Microsoft JhengHei",sans-serif;line-height:1.7}
+.wrap{max-width:720px;margin:0 auto;padding:16px}
+h1,h2{margin:.3em 0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin:12px 0}
+input,select,button{font:inherit}
+input,select{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--ink);margin:6px 0}
+button{border:0;border-radius:10px;padding:10px 18px;background:var(--accent);color:#fff;cursor:pointer}
+button.ghost{background:#f3e9da;color:var(--ink)}
+button.del{background:#fff;color:#c0504d;border:1px solid #efcfcd;padding:4px 10px}
+label{font-size:14px;color:var(--sub)}
+.center{min-height:80vh;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center}
+.center input{max-width:260px;text-align:center}
+.err{color:#c0504d;min-height:1.5em;font-size:14px}
+.top{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.back{background:#f3e9da;color:var(--ink);padding:6px 14px;font-size:18px}
+.item{display:flex;justify-content:space-between;align-items:center;padding:14px 16px;background:var(--card);border:1px solid var(--line);border-radius:12px;margin:8px 0;cursor:pointer}
+.item.read{background:#e8f4e8;border-color:#bcdcbc;color:var(--ok)}
+.tools{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0;align-items:center}
+.tools button{padding:6px 12px;background:#f3e9da;color:var(--ink)}
+.tools input[type=color]{width:38px;height:34px;padding:2px;margin:0}
+#editor{min-height:180px;border:1px solid var(--line);border-radius:10px;padding:10px;background:#fff;outline:none;white-space:pre-wrap}
+.content{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;font-size:18px;white-space:pre-wrap;word-break:break-word}
+.row{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 0;border-bottom:1px dashed var(--line)}
+.row:last-child{border:0}
+.big{width:100%;margin:18px 0;padding:14px;font-size:17px}
+.muted{color:var(--sub);text-align:center;padding:20px}
+.hide{display:none}
+</style>
+</head>
+<body>
+<div class="wrap" id="app"></div>
+<script>
+// ===== Supabase 設定：把下面兩行換成你自己的 =====
+const SUPABASE_URL='https://utvswvsqizzmhfuhexai.supabase.co';
+const SUPABASE_KEY='sb_publishable_CEHe6bg9d9xw6tbP2SHG1A_FSp1CKUf';
+const HDR={apikey:SUPABASE_KEY,'Content-Type':'application/json'};
+if(SUPABASE_KEY.startsWith('eyJ'))HDR.Authorization='Bearer '+SUPABASE_KEY; // 舊版 anon key 才需要
+const T=SUPABASE_URL+'/rest/v1/chapters';
+const db={
+  async list(){
+    try{const r=await fetch(T+'?select=*&order=created_at.asc',{headers:HDR});
+      if(!r.ok)throw new Error(r.status);return await r.json();}
+    catch(e){console.error(e);return [];}
+  },
+  async add(item){
+    try{const r=await fetch(T,{method:'POST',headers:{...HDR,Prefer:'return=minimal'},body:JSON.stringify(item)});
+      if(!r.ok)throw new Error(r.status);}
+    catch(e){console.error(e);alert('儲存失敗');}
+  },
+  async remove(id){
+    try{const r=await fetch(T+'?id=eq.'+encodeURIComponent(id),{method:'DELETE',headers:HDR});
+      if(!r.ok)throw new Error(r.status);}
+    catch(e){console.error(e);alert('刪除失敗');}
+  }
+};
+// ===== 已讀狀態（每位讀者各自記錄）=====
+const readSet=()=>{try{return JSON.parse(localStorage.getItem('readDone')||'[]')}catch(e){return []}};
+const markRead=id=>{try{const s=readSet();if(!s.includes(id)){s.push(id);localStorage.setItem('readDone',JSON.stringify(s));}}catch(e){}};
+
+// ===== 簡易淨化：只保留文字格式 =====
+function clean(html){
+  const ok=['B','STRONG','I','EM','U','S','SPAN','FONT','BR','DIV','P'];
+  const doc=new DOMParser().parseFromString('<body>'+html+'</body>','text/html');
+  (function walk(n){
+    [...n.childNodes].forEach(c=>{
+      if(c.nodeType===1){
+        if(!ok.includes(c.tagName)){c.replaceWith(document.createTextNode(c.textContent));return;}
+        [...c.attributes].forEach(a=>{
+          if(a.name==='color'&&c.tagName==='FONT')return;
+          if(a.name==='style'){
+            const keep=a.value.split(';').filter(s=>/^\s*(color|background-color|font-weight|font-style|text-decoration[a-z-]*)\s*:/i.test(s)&&!/url|expression/i.test(s));
+            c.setAttribute('style',keep.join(';'));return;
+          }
+          c.removeAttribute(a.name);
+        });
+        walk(c);
+      }
+    });
+  })(doc.body);
+  return doc.body.innerHTML;
+}
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const app=document.getElementById('app');
+const epNum=c=>{const m=String(c.ep).match(/\d+(\.\d+)?/);return m?parseFloat(m[0]):NaN;};
+const sortEp=(a,b)=>{
+  const x=epNum(a),y=epNum(b);
+  if(!isNaN(x)&&!isNaN(y)&&x!==y)return x-y;
+  if(isNaN(x)!==isNaN(y))return isNaN(x)?1:-1;
+  return String(a.ep).localeCompare(String(b.ep),'zh',{numeric:true});
+};
+
+// ===== 密碼頁 =====
+function login(){
+  app.innerHTML=`<div class="center"><p style="color:var(--sub)">請輸入密碼</p>
+  <input id="pw" type="password" inputmode="numeric" autocomplete="off" placeholder="密碼">
+  <div class="err" id="err"></div><button id="go">進入</button></div>`;
+  const go=()=>{
+    const v=document.getElementById('pw').value;
+    if(v==='7777')admin();else if(v==='9999')front();
+    else{document.getElementById('err').textContent='密碼錯誤';}
+  };
+  document.getElementById('go').onclick=go;
+  document.getElementById('pw').onkeydown=e=>{if(e.key==='Enter')go();};
+}
+
+// ===== 後台 =====
+async function admin(){
+  const all=await db.list();
+  const books=[...new Set(all.map(c=>c.book))];
+  app.innerHTML=`<div class="top"><button class="back" id="out">←</button><h2>後台管理</h2></div>
+  <div class="card">
+    <label>書名</label>
+    <select id="bsel"><option value="__custom">自訂</option>${books.map(b=>`<option value="${esc(b)}">${esc(b)}</option>`).join('')}</select>
+    <input id="bcustom" placeholder="請輸入書名">
+    <label>話數</label><input id="ep" placeholder="例如：1">
+    <label>內文（直接貼上即可，會自動判斷顏色、粗體等格式）</label>
+    <div id="editor" contenteditable="true"></div>
+    <div class="err" id="msg"></div>
+    <button class="big" id="add">新增</button>
+  </div>
+  <h2>現有書單</h2><div id="lib"></div>`;
+  const sel=document.getElementById('bsel'),cus=document.getElementById('bcustom'),ed=document.getElementById('editor');
+  sel.onchange=()=>cus.classList.toggle('hide',sel.value!=='__custom');
+  document.getElementById('out').onclick=login;
+  ed.addEventListener('paste',e=>{
+    const cd=e.clipboardData;if(!cd)return;
+    e.preventDefault();
+    const h=cd.getData('text/html');
+    if(h)document.execCommand('insertHTML',false,clean(h));
+    else document.execCommand('insertText',false,cd.getData('text/plain'));
+  });
+  document.getElementById('add').onclick=async()=>{
+    const book=(sel.value==='__custom'?cus.value:sel.value).trim();
+    const ep=document.getElementById('ep').value.trim();
+    const html=clean(ed.innerHTML).trim();
+    if(!book||!ep||!ed.textContent.trim()){document.getElementById('msg').textContent='請填寫書名、話數與內文';return;}
+    await db.add({id:Date.now().toString(36)+Math.random().toString(36).slice(2,6),book,ep,html});
+    admin();
+  };
+  const lib=document.getElementById('lib');
+  if(!all.length)lib.innerHTML='<div class="muted">尚無資料</div>';
+  books.forEach(b=>{
+    const card=document.createElement('div');card.className='card';
+    card.innerHTML=`<b>${esc(b)}</b>`;
+    all.filter(c=>c.book===b).sort(sortEp).forEach(c=>{
+      const r=document.createElement('div');r.className='row';
+      r.innerHTML=`<span>第 ${esc(c.ep)} 話</span><button class="del">刪除</button>`;
+      const btn=r.querySelector('button');let armed=false;
+      btn.onclick=async()=>{
+        if(!armed){
+          armed=true;btn.textContent='確定刪除？';btn.style.background='#c0504d';btn.style.color='#fff';
+          setTimeout(()=>{armed=false;btn.textContent='刪除';btn.style.background='';btn.style.color='';},3000);
+          return;
+        }
+        await db.remove(c.id);admin();
+      };
+      card.appendChild(r);
+    });
+    lib.appendChild(card);
+  });
+}
+
+// ===== 前台 =====
+async function front(){
+  const all=await db.list();
+  const books=[...new Set(all.map(c=>c.book))];
+  app.innerHTML=`<div class="top"><button class="back" id="out">←</button><h2>書單</h2></div><div id="l"></div>`;
+  document.getElementById('out').onclick=login;
+  const l=document.getElementById('l');
+  if(!books.length)l.innerHTML='<div class="muted">目前沒有書籍</div>';
+  books.forEach(b=>{
+    const d=document.createElement('div');d.className='item';
+    d.innerHTML=`<span>${esc(b)}</span><span>›</span>`;
+    d.onclick=()=>chapters(b,all);l.appendChild(d);
+  });
+}
+function chapters(book,all){
+  const rd=readSet();
+  app.innerHTML=`<div class="top"><button class="back" id="bk">←</button><h2>${esc(book)}</h2></div><div id="l"></div>`;
+  document.getElementById('bk').onclick=front;
+  const l=document.getElementById('l');
+  all.filter(c=>c.book===book).sort(sortEp).forEach(c=>{
+    const done=rd.includes(c.id);
+    const d=document.createElement('div');d.className='item'+(done?' read':'');
+    d.innerHTML=`<span>第 ${esc(c.ep)} 話</span><span>${done?'✓ 已讀':'›'}</span>`;
+    d.onclick=()=>reader(c,book,all);l.appendChild(d);
+  });
+}
+function reader(c,book,all){
+  app.innerHTML=`<div class="top"><button class="back" id="bk">←</button><h2>${esc(book)} 第 ${esc(c.ep)} 話</h2></div>
+  <div class="content">${clean(c.html)}</div><button class="big" id="done">閱讀完畢</button>`;
+  document.getElementById('bk').onclick=()=>chapters(book,all);
+  document.getElementById('done').onclick=()=>{markRead(c.id);chapters(book,all);};
+  window.scrollTo(0,0);
+}
+login();
+</script>
+</body>
+</html>
