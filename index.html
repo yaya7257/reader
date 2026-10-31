@@ -28,13 +28,24 @@ label{font-size:14px;color:var(--sub)}
 .tools{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0;align-items:center}
 .tools button{padding:6px 12px;background:#f3e9da;color:var(--ink)}
 .tools input[type=color]{width:38px;height:34px;padding:2px;margin:0}
-#editor{min-height:180px;border:1px solid var(--line);border-radius:10px;padding:10px;background:#fff;outline:none;white-space:pre-wrap}
-.content{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;font-size:18px;white-space:pre-wrap;word-break:break-word}
+#editor{height:260px;overflow-y:auto;border:1px solid var(--line);border-radius:10px;padding:10px;background:#fff;outline:none;white-space:pre-wrap}
+.content{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;font-size:calc(18px + 1pt);white-space:pre-wrap;word-break:break-word}
 .row{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 0;border-bottom:1px dashed var(--line)}
 .row:last-child{border:0}
 .big{width:100%;margin:18px 0;padding:14px;font-size:17px}
 .muted{color:var(--sub);text-align:center;padding:20px}
 .hide{display:none}
+.bar{position:fixed;left:0;right:0;bottom:0;z-index:5;display:grid;grid-template-columns:1fr auto 1fr;align-items:center;height:calc(46px + env(safe-area-inset-bottom,0px));padding:0 16px env(safe-area-inset-bottom,0px);background:rgba(255,255,255,.96);border-top:1px solid var(--line)}
+.bar .circ{width:38px;height:38px;border-radius:50%;padding:0;font-size:18px;line-height:1;display:flex;align-items:center;justify-content:center}
+.bar .no{justify-self:end;font-size:14px;color:var(--sub)}
+.big.off{background:#ddd5c8;color:#9c9285}
+.big.ok{background:var(--ok)}
+.star{color:#f0b429}
+.sv{width:1em;height:1em;vertical-align:-.15em}
+.bar .no{display:flex;align-items:center;gap:4px}
+.starbtn{background:none;color:#c9b99f;padding:0 2px;font-size:24px;line-height:1;display:flex}
+.starbtn.on{color:#f0b429}
+.fab{position:fixed;right:16px;bottom:calc(20px + env(safe-area-inset-bottom,0px));width:54px;height:54px;border-radius:50%;padding:0;font-size:13px;box-shadow:0 2px 10px rgba(0,0,0,.2);z-index:5}
 </style>
 </head>
 <body>
@@ -46,26 +57,66 @@ const SUPABASE_KEY='sb_publishable_CEHe6bg9d9xw6tbP2SHG1A_FSp1CKUf';
 const HDR={apikey:SUPABASE_KEY,'Content-Type':'application/json'};
 if(SUPABASE_KEY.startsWith('eyJ'))HDR.Authorization='Bearer '+SUPABASE_KEY; // 舊版 anon key 才需要
 const T=SUPABASE_URL+'/rest/v1/chapters';
+const S=SUPABASE_URL+'/rest/v1/reader_state';
+let ST={};try{ST=JSON.parse(localStorage.getItem('stCache')||'{}')}catch(e){}
+const stSave=()=>{try{localStorage.setItem('stCache',JSON.stringify(ST))}catch(e){}};
+const pending=new Set();
+async function stPush(ids){
+  ids.forEach(id=>pending.add(id));
+  try{
+    const rows=ids.map(id=>({chapter_id:id,fav:!!(ST[id]&&ST[id].fav),done:!!(ST[id]&&ST[id].done)}));
+    const r=await fetch(S,{method:'POST',headers:{...HDR,Prefer:'resolution=merge-duplicates,return=minimal'},body:JSON.stringify(rows)});
+    if(!r.ok)throw new Error(r.status);
+    ids.forEach(id=>pending.delete(id));return true;
+  }catch(e){console.error(e);return false;}
+}
+async function stLoad(){
+  try{
+    const r=await fetch(S+'?select=*',{headers:HDR});
+    if(!r.ok)throw new Error(r.status);
+    const m={};(await r.json()).forEach(x=>m[x.chapter_id]={fav:x.fav,done:x.done});
+    pending.forEach(id=>{if(ST[id])m[id]=ST[id];});
+    ST=m;stSave();
+    if(pending.size)stPush([...pending]);
+  }catch(e){console.error(e);}
+}
+const cacheGet=()=>{try{return JSON.parse(localStorage.getItem('chCache')||'null');}catch(e){return null;}};
+const cacheSet=l=>{try{localStorage.setItem('chCache',JSON.stringify(l));}catch(e){}};
 const db={
   async list(){
     try{const r=await fetch(T+'?select=*&order=created_at.asc',{headers:HDR});
-      if(!r.ok)throw new Error(r.status);return await r.json();}
-    catch(e){console.error(e);return [];}
+      if(!r.ok)throw new Error(r.status);const l=await r.json();cacheSet(l);return l;}
+    catch(e){console.error(e);return cacheGet()||[];}
   },
   async add(item){
     try{const r=await fetch(T,{method:'POST',headers:{...HDR,Prefer:'return=minimal'},body:JSON.stringify(item)});
-      if(!r.ok)throw new Error(r.status);}
+      if(!r.ok)throw new Error(r.status);cacheSet([...(cacheGet()||[]),item]);}
     catch(e){console.error(e);alert('儲存失敗');}
   },
   async remove(id){
     try{const r=await fetch(T+'?id=eq.'+encodeURIComponent(id),{method:'DELETE',headers:HDR});
-      if(!r.ok)throw new Error(r.status);}
+      if(!r.ok)throw new Error(r.status);cacheSet((cacheGet()||[]).filter(c=>c.id!==id));}
     catch(e){console.error(e);alert('刪除失敗');}
   }
 };
 // ===== 已讀狀態（每位讀者各自記錄）=====
-const readSet=()=>{try{return JSON.parse(localStorage.getItem('readDone')||'[]')}catch(e){return []}};
-const markRead=id=>{try{const s=readSet();if(!s.includes(id)){s.push(id);localStorage.setItem('readDone',JSON.stringify(s));}}catch(e){}};
+const readSet=()=>Object.keys(ST).filter(k=>ST[k].done);
+const markRead=id=>{ST[id]={...(ST[id]||{}),done:true};stSave();stPush([id]);};
+const favGet=()=>Object.keys(ST).filter(k=>ST[k].fav);
+const favToggle=id=>{const on=!(ST[id]&&ST[id].fav);ST[id]={...(ST[id]||{}),fav:on};stSave();stPush([id]);return on;};
+// 一次性：把這台裝置舊的本機「已讀／最愛」搬到雲端
+async function migrate(all){
+  try{
+    if(localStorage.getItem('stMigrated')||!all.length)return;
+    const ids=new Set(all.map(c=>c.id)),ch=new Set();
+    JSON.parse(localStorage.getItem('readDone')||'[]').forEach(id=>{if(ids.has(id)){ST[id]={...(ST[id]||{}),done:true};ch.add(id);}});
+    JSON.parse(localStorage.getItem('favs')||'[]').forEach(id=>{if(ids.has(id)){ST[id]={...(ST[id]||{}),fav:true};ch.add(id);}});
+    if(ch.size){stSave();if(!(await stPush([...ch])))return;}
+    localStorage.setItem('stMigrated','1');
+  }catch(e){}
+}
+const STAR=on=>`<svg class="sv" viewBox="0 0 24 24"><path d="M12 3.2l2.6 5.4 5.9.8-4.3 4.1 1 5.9L12 16.6l-5.2 2.8 1-5.9-4.3-4.1 5.9-.8z" fill="${on?'currentColor':'none'}" stroke="currentColor" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/></svg>`;
+let sortDesc=false;try{sortDesc=localStorage.getItem('sortDesc')==='1'}catch(e){}
 
 // ===== 簡易淨化：只保留文字格式 =====
 function clean(html){
@@ -99,28 +150,43 @@ const sortEp=(a,b)=>{
   return String(a.ep).localeCompare(String(b.ep),'zh',{numeric:true});
 };
 
+// ===== 頁面導覽（讓手機系統的「上一頁」對應網頁內的上一頁）=====
+let ALL=[],histOK=true,NAV=0;
+const show=v=>{
+  NAV++;
+  if(v.n==='admin')admin();
+  else if(v.n==='front')front();
+  else if(v.n==='chapters'&&ALL.length)chapters(v.book,ALL);
+  else if(v.n==='reader'&&ALL.length){const c=ALL.find(x=>x.id===v.id);c?reader(c,v.book,ALL):front();}
+  else login();
+};
+const go=(v,mode)=>{
+  try{history[mode==='replace'?'replaceState':'pushState'](v,'');}catch(e){histOK=false;}
+  show(v);
+};
+const back=v=>{if(histOK&&history.state)history.back();else show(v);};
+window.addEventListener('popstate',e=>show(e.state||{n:'login'}));
+
 // ===== 密碼頁 =====
 function login(){
   app.innerHTML=`<div class="center"><p style="color:var(--sub)">請輸入密碼</p>
   <input id="pw" type="password" inputmode="numeric" autocomplete="off" placeholder="密碼">
   <div class="err" id="err"></div><button id="go">進入</button></div>`;
-  const go=()=>{
+  const enter=()=>{
     const v=document.getElementById('pw').value;
-    if(v==='7777')admin();else if(v==='9999')front();
+    if(v==='7777')go({n:'admin'});else if(v==='9999')go({n:'front'});
     else{document.getElementById('err').textContent='密碼錯誤';}
   };
-  document.getElementById('go').onclick=go;
-  document.getElementById('pw').onkeydown=e=>{if(e.key==='Enter')go();};
+  document.getElementById('go').onclick=enter;
+  document.getElementById('pw').onkeydown=e=>{if(e.key==='Enter')enter();};
 }
 
 // ===== 後台 =====
 async function admin(){
-  const all=await db.list();
-  const books=[...new Set(all.map(c=>c.book))];
   app.innerHTML=`<div class="top"><button class="back" id="out">←</button><h2>後台管理</h2></div>
   <div class="card">
     <label>書名</label>
-    <select id="bsel"><option value="__custom">自訂</option>${books.map(b=>`<option value="${esc(b)}">${esc(b)}</option>`).join('')}</select>
+    <select id="bsel"></select>
     <input id="bcustom" placeholder="請輸入書名">
     <label>話數</label><input id="ep" placeholder="例如：1">
     <label>內文（直接貼上即可，會自動判斷顏色、粗體等格式）</label>
@@ -129,9 +195,38 @@ async function admin(){
     <button class="big" id="add">新增</button>
   </div>
   <h2>現有書單</h2><div id="lib"></div>`;
-  const sel=document.getElementById('bsel'),cus=document.getElementById('bcustom'),ed=document.getElementById('editor');
+  const sel=document.getElementById('bsel'),cus=document.getElementById('bcustom'),ed=document.getElementById('editor'),lib=document.getElementById('lib');
+  const fill=all=>{
+    ALL=all;
+    const books=[...new Set(all.map(c=>c.book))];
+    const keep=sel.value;
+    sel.innerHTML='<option value="__custom">自訂</option>'+books.map(b=>`<option value="${esc(b)}">${esc(b)}</option>`).join('');
+    if(books.includes(keep))sel.value=keep;
+    cus.classList.toggle('hide',sel.value!=='__custom');
+    lib.innerHTML='';
+    if(!all.length)lib.innerHTML='<div class="muted">尚無資料</div>';
+    books.forEach(b=>{
+      const card=document.createElement('div');card.className='card';
+      card.innerHTML=`<b>${esc(b)}</b>`;
+      all.filter(c=>c.book===b).sort(sortEp).forEach(c=>{
+        const r=document.createElement('div');r.className='row';
+        r.innerHTML=`<span>第 ${esc(c.ep)} 話</span><button class="del">刪除</button>`;
+        const btn=r.querySelector('button');let armed=false;
+        btn.onclick=async()=>{
+          if(!armed){
+            armed=true;btn.textContent='確定刪除？';btn.style.background='#c0504d';btn.style.color='#fff';
+            setTimeout(()=>{armed=false;btn.textContent='刪除';btn.style.background='';btn.style.color='';},3000);
+            return;
+          }
+          await db.remove(c.id);admin();
+        };
+        card.appendChild(r);
+      });
+      lib.appendChild(card);
+    });
+  };
   sel.onchange=()=>cus.classList.toggle('hide',sel.value!=='__custom');
-  document.getElementById('out').onclick=login;
+  document.getElementById('out').onclick=()=>back({n:'login'});
   ed.addEventListener('paste',e=>{
     const cd=e.clipboardData;if(!cd)return;
     e.preventDefault();
@@ -147,62 +242,81 @@ async function admin(){
     await db.add({id:Date.now().toString(36)+Math.random().toString(36).slice(2,6),book,ep,html});
     admin();
   };
-  const lib=document.getElementById('lib');
-  if(!all.length)lib.innerHTML='<div class="muted">尚無資料</div>';
-  books.forEach(b=>{
-    const card=document.createElement('div');card.className='card';
-    card.innerHTML=`<b>${esc(b)}</b>`;
-    all.filter(c=>c.book===b).sort(sortEp).forEach(c=>{
-      const r=document.createElement('div');r.className='row';
-      r.innerHTML=`<span>第 ${esc(c.ep)} 話</span><button class="del">刪除</button>`;
-      const btn=r.querySelector('button');let armed=false;
-      btn.onclick=async()=>{
-        if(!armed){
-          armed=true;btn.textContent='確定刪除？';btn.style.background='#c0504d';btn.style.color='#fff';
-          setTimeout(()=>{armed=false;btn.textContent='刪除';btn.style.background='';btn.style.color='';},3000);
-          return;
-        }
-        await db.remove(c.id);admin();
-      };
-      card.appendChild(r);
-    });
-    lib.appendChild(card);
-  });
+  fill(cacheGet()||[]);
+  const t=NAV;
+  const all=await db.list();
+  if(t===NAV)fill(all);else ALL=all;
 }
 
 // ===== 前台 =====
-async function front(){
-  const all=await db.list();
+function renderFront(all,loading){
+  ALL=all;
   const books=[...new Set(all.map(c=>c.book))];
   app.innerHTML=`<div class="top"><button class="back" id="out">←</button><h2>書單</h2></div><div id="l"></div>`;
-  document.getElementById('out').onclick=login;
+  document.getElementById('out').onclick=()=>back({n:'login'});
   const l=document.getElementById('l');
-  if(!books.length)l.innerHTML='<div class="muted">目前沒有書籍</div>';
+  if(loading)l.innerHTML='<div class="muted">載入中…</div>';
+  else if(!books.length)l.innerHTML='<div class="muted">目前沒有書籍</div>';
   books.forEach(b=>{
     const d=document.createElement('div');d.className='item';
     d.innerHTML=`<span>${esc(b)}</span><span>›</span>`;
-    d.onclick=()=>chapters(b,all);l.appendChild(d);
+    d.onclick=()=>go({n:'chapters',book:b});l.appendChild(d);
   });
 }
+async function front(){
+  const c=cacheGet(),t=NAV;
+  renderFront(c||[],!c);
+  const [all]=await Promise.all([db.list(),stLoad()]);
+  migrate(all);
+  if(t===NAV)renderFront(all);else ALL=all;
+}
+
 function chapters(book,all){
-  const rd=readSet();
-  app.innerHTML=`<div class="top"><button class="back" id="bk">←</button><h2>${esc(book)}</h2></div><div id="l"></div>`;
-  document.getElementById('bk').onclick=front;
-  const l=document.getElementById('l');
-  all.filter(c=>c.book===book).sort(sortEp).forEach(c=>{
-    const done=rd.includes(c.id);
-    const d=document.createElement('div');d.className='item'+(done?' read':'');
-    d.innerHTML=`<span>第 ${esc(c.ep)} 話</span><span>${done?'✓ 已讀':'›'}</span>`;
-    d.onclick=()=>reader(c,book,all);l.appendChild(d);
-  });
+  const rd=readSet(),fv=favGet();let only=false;
+  app.innerHTML=`<div class="top"><button class="back" id="bk">←</button><h2>${esc(book)}</h2><button class="starbtn" id="fo" style="margin-left:auto;font-size:28px;padding:4px"></button></div><div id="l"></div><div style="height:80px"></div><button class="fab" id="srt"></button>`;
+  document.getElementById('bk').onclick=()=>back({n:'front'});
+  const l=document.getElementById('l'),sb=document.getElementById('srt'),fo=document.getElementById('fo');
+  const draw=()=>{
+    sb.textContent=sortDesc?'倒序':'正序';
+    fo.innerHTML=STAR(only);fo.classList.toggle('on',only);
+    l.innerHTML='';
+    let arr=all.filter(c=>c.book===book).sort(sortEp);
+    if(only)arr=arr.filter(c=>fv.includes(c.id));
+    if(sortDesc)arr.reverse();
+    if(only&&!arr.length)l.innerHTML='<div class="muted">還沒有加入最愛的話數</div>';
+    arr.forEach(c=>{
+      const done=rd.includes(c.id);
+      const d=document.createElement('div');d.className='item'+(done?' read':'');
+      d.innerHTML=`<span>第 ${esc(c.ep)} 話${fv.includes(c.id)?' <span class="star">'+STAR(true)+'</span>':''}</span><span>${done?'✓ 已讀':'›'}</span>`;
+      d.onclick=()=>go({n:'reader',book,id:c.id});l.appendChild(d);
+    });
+  };
+  sb.onclick=()=>{sortDesc=!sortDesc;try{localStorage.setItem('sortDesc',sortDesc?'1':'0')}catch(e){}draw();};
+  fo.onclick=()=>{only=!only;draw();};
+  draw();
 }
 function reader(c,book,all){
   app.innerHTML=`<div class="top"><button class="back" id="bk">←</button><h2>${esc(book)} 第 ${esc(c.ep)} 話</h2></div>
-  <div class="content">${clean(c.html)}</div><button class="big" id="done">閱讀完畢</button>`;
-  document.getElementById('bk').onclick=()=>chapters(book,all);
-  document.getElementById('done').onclick=()=>{markRead(c.id);chapters(book,all);};
+  <div class="content">${clean(c.html)}</div><button class="big" id="done">閱讀完畢</button><button class="big" id="next" style="margin-top:0">下一話 →</button><div class="err" id="nmsg" style="text-align:center"></div><div style="height:56px"></div>
+  <div class="bar"><span></span><button class="circ" id="bk2">←</button><span class="no">第 ${esc(c.ep)} 話<button class="starbtn" id="fav"></button></span></div>`;
+  document.getElementById('bk').onclick=()=>back({n:'chapters',book});
+  document.getElementById('bk2').onclick=()=>back({n:'chapters',book});
+  const fb=document.getElementById('fav');
+  const setFav=on=>{fb.innerHTML=STAR(on);fb.classList.toggle('on',on);};
+  setFav(favGet().includes(c.id));
+  fb.onclick=()=>setFav(favToggle(c.id));
+  const list=all.filter(x=>x.book===book).sort(sortEp),nx=list[list.findIndex(x=>x.id===c.id)+1];
+  const nb=document.getElementById('next');
+  if(!nx)nb.classList.add('off');
+  nb.onclick=()=>{if(nx)go({n:'reader',book,id:nx.id},'replace');else document.getElementById('nmsg').textContent='已是最後一話';};
+  const dn=document.getElementById('done');
+  const setDone=()=>{dn.textContent='已閱讀完畢 ✓';dn.classList.add('ok');};
+  if(readSet().includes(c.id))setDone();
+  dn.onclick=()=>{markRead(c.id);setDone();};
   window.scrollTo(0,0);
 }
+try{history.replaceState({n:'login'},'');}catch(e){histOK=false;}
+Promise.all([db.list(),stLoad()]); // 預先載入，進入前後台時就不用等
 login();
 </script>
 </body>
