@@ -41,6 +41,14 @@ label{font-size:14px;color:var(--sub)}
 .big.off{background:#ddd5c8;color:#9c9285}
 .big.ok{background:var(--ok)}
 .star{color:#f0b429}
+.btns{display:flex;gap:6px}
+.chk{display:flex;align-items:center;gap:8px;color:var(--ink);font-size:15px;margin:6px 0}
+.chk input{width:auto;margin:0}
+.bhead{display:flex;justify-content:space-between;align-items:center;cursor:pointer}
+.cnt{color:var(--sub);font-size:14px}
+.bbody{margin-top:8px}
+input:disabled,select:disabled{background:#f3ede3;color:var(--sub)}
+.edit{background:#fff;color:var(--accent);border:1px solid #f0d3bb;padding:4px 10px}
 .sv{width:1em;height:1em;vertical-align:-.15em}
 .bar .no{display:flex;align-items:center;gap:4px}
 .starbtn{background:none;color:#c9b99f;padding:0 2px;font-size:24px;line-height:1;display:flex}
@@ -92,6 +100,13 @@ const db={
     try{const r=await fetch(T,{method:'POST',headers:{...HDR,Prefer:'return=minimal'},body:JSON.stringify(item)});
       if(!r.ok)throw new Error(r.status);cacheSet([...(cacheGet()||[]),item]);}
     catch(e){console.error(e);alert('儲存失敗');}
+  },
+  async update(id,f){
+    try{const r=await fetch(T+'?id=eq.'+encodeURIComponent(id),{method:'PATCH',headers:{...HDR,Prefer:'return=representation'},body:JSON.stringify(f)});
+      if(!r.ok)throw new Error(r.status);
+      if(!(await r.json()).length)throw new Error('no rows updated');
+      cacheSet((cacheGet()||[]).map(c=>c.id===id?{...c,...f}:c));return true;}
+    catch(e){console.error(e);return false;}
   },
   async remove(id){
     try{const r=await fetch(T+'?id=eq.'+encodeURIComponent(id),{method:'DELETE',headers:HDR});
@@ -151,7 +166,7 @@ const sortEp=(a,b)=>{
 };
 
 // ===== 頁面導覽（讓手機系統的「上一頁」對應網頁內的上一頁）=====
-let ALL=[],histOK=true,NAV=0;
+let ALL=[],histOK=true,NAV=0;const OPEN=new Set(),KEEP={on:false,book:''};
 const show=v=>{
   NAV++;
   if(v.n==='admin')admin();
@@ -188,11 +203,13 @@ async function admin(){
     <label>書名</label>
     <select id="bsel"></select>
     <input id="bcustom" placeholder="請輸入書名">
+    <label class="chk"><input type="checkbox" id="keep">繼續上傳（新增後保留此書名）</label>
     <label>話數</label><input id="ep" placeholder="例如：1">
     <label>內文（直接貼上即可，會自動判斷顏色、粗體等格式）</label>
     <div id="editor" contenteditable="true"></div>
     <div class="err" id="msg"></div>
     <button class="big" id="add">新增</button>
+    <button class="big ghost hide" id="cancel" style="margin-top:0">取消編輯</button>
   </div>
   <h2>現有書單</h2><div id="lib"></div>`;
   const sel=document.getElementById('bsel'),cus=document.getElementById('bcustom'),ed=document.getElementById('editor'),lib=document.getElementById('lib');
@@ -207,11 +224,14 @@ async function admin(){
     if(!all.length)lib.innerHTML='<div class="muted">尚無資料</div>';
     books.forEach(b=>{
       const card=document.createElement('div');card.className='card';
-      card.innerHTML=`<b>${esc(b)}</b>`;
-      all.filter(c=>c.book===b).sort(sortEp).forEach(c=>{
+      const list=all.filter(c=>c.book===b).sort(sortEp).reverse();
+      card.innerHTML=`<div class="bhead"><b>${esc(b)}</b><span class="cnt"></span></div>`;
+      const body=document.createElement('div');body.className='bbody';
+      list.forEach(c=>{
         const r=document.createElement('div');r.className='row';
-        r.innerHTML=`<span>第 ${esc(c.ep)} 話</span><button class="del">刪除</button>`;
-        const btn=r.querySelector('button');let armed=false;
+        r.innerHTML=`<span>第 ${esc(c.ep)} 話</span><span class="btns"><button class="edit">編輯</button><button class="del">刪除</button></span>`;
+        r.querySelector('.edit').onclick=()=>startEdit(c);
+        const btn=r.querySelector('.del');let armed=false;
         btn.onclick=async()=>{
           if(!armed){
             armed=true;btn.textContent='確定刪除？';btn.style.background='#c0504d';btn.style.color='#fff';
@@ -220,11 +240,29 @@ async function admin(){
           }
           await db.remove(c.id);admin();
         };
-        card.appendChild(r);
+        body.appendChild(r);
       });
+      card.appendChild(body);
+      const cnt=card.querySelector('.cnt');
+      const sync=()=>{const o=OPEN.has(b);body.classList.toggle('hide',!o);cnt.textContent=list.length+' 話 '+(o?'▴':'▾');};
+      card.querySelector('.bhead').onclick=()=>{OPEN.has(b)?OPEN.delete(b):OPEN.add(b);sync();};
+      sync();
       lib.appendChild(card);
     });
   };
+  let editId=null;
+  const addBtn=document.getElementById('add'),cancelBtn=document.getElementById('cancel');
+  const startEdit=c=>{
+    editId=c.id;
+    sel.value=c.book;cus.classList.toggle('hide',sel.value!=='__custom');
+    document.getElementById('ep').value=c.ep;
+    document.getElementById('ep').disabled=true;sel.disabled=true;cus.disabled=true;
+    ed.innerHTML=clean(c.html);
+    addBtn.textContent='儲存修改';cancelBtn.classList.remove('hide');
+    document.getElementById('msg').textContent='編輯中：'+c.book+' 第 '+c.ep+' 話';
+    window.scrollTo({top:0,behavior:'smooth'});
+  };
+  cancelBtn.onclick=()=>admin();
   sel.onchange=()=>cus.classList.toggle('hide',sel.value!=='__custom');
   document.getElementById('out').onclick=()=>back({n:'login'});
   ed.addEventListener('paste',e=>{
@@ -239,10 +277,17 @@ async function admin(){
     const ep=document.getElementById('ep').value.trim();
     const html=clean(ed.innerHTML).trim();
     if(!book||!ep||!ed.textContent.trim()){document.getElementById('msg').textContent='請填寫書名、話數與內文';return;}
-    await db.add({id:Date.now().toString(36)+Math.random().toString(36).slice(2,6),book,ep,html});
+    if(editId){
+      if(!(await db.update(editId,{html}))){document.getElementById('msg').textContent='修改失敗，請確認已在 Supabase 加上修改權限';return;}
+    }else{
+      await db.add({id:Date.now().toString(36)+Math.random().toString(36).slice(2,6),book,ep,html});
+      KEEP.on=document.getElementById('keep').checked;KEEP.book=book;
+    }
     admin();
   };
   fill(cacheGet()||[]);
+  const kp=document.getElementById('keep');kp.checked=KEEP.on;kp.onchange=()=>{KEEP.on=kp.checked;};
+  if(KEEP.on&&KEEP.book&&[...sel.options].some(o=>o.value===KEEP.book)){sel.value=KEEP.book;cus.classList.add('hide');document.getElementById('ep').focus();}
   const t=NAV;
   const all=await db.list();
   if(t===NAV)fill(all);else ALL=all;
