@@ -68,7 +68,7 @@ const T=SUPABASE_URL+'/rest/v1/chapters';
 const S=SUPABASE_URL+'/rest/v1/reader_state';
 let ST={};try{ST=JSON.parse(localStorage.getItem('stCache')||'{}')}catch(e){}
 const stSave=()=>{try{localStorage.setItem('stCache',JSON.stringify(ST))}catch(e){}};
-const pending=new Set();
+const pending=new Set();let lastSt=0;
 async function stPush(ids){
   ids.forEach(id=>pending.add(id));
   try{
@@ -78,39 +78,70 @@ async function stPush(ids){
     ids.forEach(id=>pending.delete(id));return true;
   }catch(e){console.error(e);return false;}
 }
-async function stLoad(){
+async function stLoad(force){
+  if(!force&&Date.now()-lastSt<ST_TTL)return;
   try{
     const r=await fetch(S+'?select=*',{headers:HDR});
     if(!r.ok)throw new Error(r.status);
     const m={};(await r.json()).forEach(x=>m[x.chapter_id]={fav:x.fav,done:x.done});
     pending.forEach(id=>{if(ST[id])m[id]=ST[id];});
-    ST=m;stSave();
+    ST=m;stSave();lastSt=Date.now();
     if(pending.size)stPush([...pending]);
   }catch(e){console.error(e);}
 }
+// 省流量設定：書單 10 分鐘內不重抓、狀態 30 秒內不重抓；內文只在點開時抓，並依「修改時間」判斷是否需要更新
+const LIST_TTL=10*60*1000,ST_TTL=30*1000,NOVER_TTL=3600*1000;
+const meta=o=>{const m={...o};delete m.html;return m;};
 const cacheGet=()=>{try{return JSON.parse(localStorage.getItem('chCache')||'null');}catch(e){return null;}};
 const cacheSet=l=>{try{localStorage.setItem('chCache',JSON.stringify(l));}catch(e){}};
+const hGet=id=>{try{return JSON.parse(localStorage.getItem('h:'+id)||'null');}catch(e){return null;}};
+const hSet=(id,h,v)=>{try{localStorage.setItem('h:'+id,JSON.stringify({h,t:Date.now(),v:v||null}));}catch(e){}};
+const hOk=(x,v)=>!!x&&(v?(x.v===v||(!x.v&&Date.now()-x.t<NOVER_TTL)):Date.now()-x.t<NOVER_TTL);
 const db={
-  async list(){
-    try{const r=await fetch(T+'?select=*&order=created_at.asc',{headers:HDR});
-      if(!r.ok)throw new Error(r.status);const l=await r.json();cacheSet(l);return l;}
-    catch(e){console.error(e);return cacheGet()||[];}
+  async list(force){
+    const c=cacheGet(),tm=+(localStorage.getItem('chTime')||0);
+    if(!force&&c&&Date.now()-tm<LIST_TTL)return c;
+    try{
+      const q=cols=>fetch(T+'?select='+cols+'&order=created_at.asc',{headers:HDR});
+      let r=await q('id,book,ep,created_at,updated_at');
+      if(r.status===400)r=await q('id,book,ep,created_at'); // 尚未建立 updated_at 欄位時的備援
+      if(!r.ok)throw new Error(r.status);
+      const l=await r.json();cacheSet(l);
+      try{localStorage.setItem('chTime',String(Date.now()));}catch(e){}return l;}
+    catch(e){console.error(e);return c||[];}
+  },
+  async html(id){
+    const cur=(cacheGet()||[]).find(c=>c.id===id),v=cur&&cur.updated_at,x=hGet(id);
+    if(hOk(x,v))return x.h;
+    try{const r=await fetch(T+'?id=eq.'+encodeURIComponent(id)+'&select=html',{headers:HDR});
+      if(!r.ok)throw new Error(r.status);const a=await r.json();
+      const h=a[0]?a[0].html:'';hSet(id,h,v);return h;}
+    catch(e){console.error(e);return x?x.h:null;}
   },
   async add(item){
     try{const r=await fetch(T,{method:'POST',headers:{...HDR,Prefer:'return=minimal'},body:JSON.stringify(item)});
-      if(!r.ok)throw new Error(r.status);cacheSet([...(cacheGet()||[]),item]);}
+      if(!r.ok)throw new Error(r.status);
+      cacheSet([...(cacheGet()||[]),meta(item)]);hSet(item.id,item.html,null);}
     catch(e){console.error(e);alert('儲存失敗');}
   },
   async update(id,f){
-    try{const r=await fetch(T+'?id=eq.'+encodeURIComponent(id),{method:'PATCH',headers:{...HDR,Prefer:'return=representation'},body:JSON.stringify(f)});
+    try{
+      const p=sel=>fetch(T+'?id=eq.'+encodeURIComponent(id)+'&select='+sel,{method:'PATCH',headers:{...HDR,Prefer:'return=representation'},body:JSON.stringify(f)});
+      let r=await p('id,updated_at');
+      if(r.status===400)r=await p('id');
       if(!r.ok)throw new Error(r.status);
-      if(!(await r.json()).length)throw new Error('no rows updated');
-      cacheSet((cacheGet()||[]).map(c=>c.id===id?{...c,...f}:c));return true;}
+      const a=await r.json();
+      if(!a.length)throw new Error('no rows updated');
+      const v=a[0].updated_at;
+      if(f.html!==undefined)hSet(id,f.html,v);
+      cacheSet((cacheGet()||[]).map(c=>c.id===id?{...c,...meta(f),...(v?{updated_at:v}:{})}:c));return true;}
     catch(e){console.error(e);return false;}
   },
   async remove(id){
     try{const r=await fetch(T+'?id=eq.'+encodeURIComponent(id),{method:'DELETE',headers:HDR});
-      if(!r.ok)throw new Error(r.status);cacheSet((cacheGet()||[]).filter(c=>c.id!==id));}
+      if(!r.ok)throw new Error(r.status);
+      cacheSet((cacheGet()||[]).filter(c=>c.id!==id));
+      try{localStorage.removeItem('h:'+id);}catch(e){}}
     catch(e){console.error(e);alert('刪除失敗');}
   }
 };
@@ -252,12 +283,14 @@ async function admin(){
   };
   let editId=null;
   const addBtn=document.getElementById('add'),cancelBtn=document.getElementById('cancel');
-  const startEdit=c=>{
+  const startEdit=async c=>{
+    const h=await db.html(c.id);
+    if(h===null){document.getElementById('msg').textContent='讀取內文失敗，請稍後再試';return;}
     editId=c.id;
     sel.value=c.book;cus.classList.toggle('hide',sel.value!=='__custom');
     document.getElementById('ep').value=c.ep;
     document.getElementById('ep').disabled=true;sel.disabled=true;cus.disabled=true;
-    ed.innerHTML=clean(c.html);
+    ed.innerHTML=clean(h);
     addBtn.textContent='儲存修改';cancelBtn.classList.remove('hide');
     document.getElementById('msg').textContent='編輯中：'+c.book+' 第 '+c.ep+' 話';
     window.scrollTo({top:0,behavior:'smooth'});
@@ -297,8 +330,9 @@ async function admin(){
 function renderFront(all,loading){
   ALL=all;
   const books=[...new Set(all.map(c=>c.book))];
-  app.innerHTML=`<div class="top"><button class="back" id="out">←</button><h2>書單</h2></div><div id="l"></div>`;
+  app.innerHTML=`<div class="top"><button class="back" id="out">←</button><h2>書單</h2><button class="back" id="rf" style="margin-left:auto" title="重新整理">↻</button></div><div id="l"></div>`;
   document.getElementById('out').onclick=()=>back({n:'login'});
+  document.getElementById('rf').onclick=async()=>{const t=NAV;await stLoad(true);const a=await db.list(true);if(t===NAV)renderFront(a);else ALL=a;};
   const l=document.getElementById('l');
   if(loading)l.innerHTML='<div class="muted">載入中…</div>';
   else if(!books.length)l.innerHTML='<div class="muted">目前沒有書籍</div>';
@@ -341,8 +375,9 @@ function chapters(book,all){
   draw();
 }
 function reader(c,book,all){
+  const t=NAV;
   app.innerHTML=`<div class="top"><button class="back" id="bk">←</button><h2>${esc(book)} 第 ${esc(c.ep)} 話</h2></div>
-  <div class="content">${clean(c.html)}</div><button class="big" id="done">閱讀完畢</button><button class="big" id="next" style="margin-top:0">下一話 →</button><div class="err" id="nmsg" style="text-align:center"></div><div style="height:56px"></div>
+  <div class="content" id="ct">載入中…</div><button class="big" id="done">閱讀完畢</button><button class="big" id="next" style="margin-top:0">下一話 →</button><div class="err" id="nmsg" style="text-align:center"></div><div style="height:56px"></div>
   <div class="bar"><span></span><button class="circ" id="bk2">←</button><span class="no">第 ${esc(c.ep)} 話<button class="starbtn" id="fav"></button></span></div>`;
   document.getElementById('bk').onclick=()=>back({n:'chapters',book});
   document.getElementById('bk2').onclick=()=>back({n:'chapters',book});
@@ -358,6 +393,7 @@ function reader(c,book,all){
   const setDone=()=>{dn.textContent='已閱讀完畢 ✓';dn.classList.add('ok');};
   if(readSet().includes(c.id))setDone();
   dn.onclick=()=>{markRead(c.id);setDone();};
+  db.html(c.id).then(h=>{const el=document.getElementById('ct');if(el&&t===NAV)el.innerHTML=h===null?'讀取失敗，請稍後再試':clean(h);});
   window.scrollTo(0,0);
 }
 try{history.replaceState({n:'login'},'');}catch(e){histOK=false;}
