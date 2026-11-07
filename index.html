@@ -42,6 +42,8 @@ label{font-size:14px;color:var(--sub)}
 .big.ok{background:var(--ok)}
 .star{color:#f0b429}
 .btns{display:flex;gap:6px}
+.fab.favfab{background:#fff;border:1px solid var(--line);color:#c9b99f;font-size:28px;display:flex;align-items:center;justify-content:center}
+.fab.favfab.on{color:#f0b429}
 .chk{display:flex;align-items:center;gap:8px;color:var(--ink);font-size:15px;margin:6px 0}
 .chk input{width:auto;margin:0}
 .bhead{display:flex;justify-content:space-between;align-items:center;cursor:pointer}
@@ -197,7 +199,7 @@ const sortEp=(a,b)=>{
 };
 
 // ===== 頁面導覽（讓手機系統的「上一頁」對應網頁內的上一頁）=====
-let ALL=[],histOK=true,NAV=0;const OPEN=new Set(),KEEP={on:false,book:''};
+let ALL=[],histOK=true,NAV=0;const OPEN=new Set(),KEEP={on:false,book:''},FILTER={};
 const show=v=>{
   NAV++;
   if(v.n==='admin')admin();
@@ -339,7 +341,7 @@ function renderFront(all,loading){
   books.forEach(b=>{
     const d=document.createElement('div');d.className='item';
     d.innerHTML=`<span>${esc(b)}</span><span>›</span>`;
-    d.onclick=()=>go({n:'chapters',book:b});l.appendChild(d);
+    d.onclick=()=>{FILTER[b]=false;go({n:'chapters',book:b});};l.appendChild(d);
   });
 }
 async function front(){
@@ -351,8 +353,8 @@ async function front(){
 }
 
 function chapters(book,all){
-  const rd=readSet(),fv=favGet();let only=false;
-  app.innerHTML=`<div class="top"><button class="back" id="bk">←</button><h2>${esc(book)}</h2><button class="starbtn" id="fo" style="margin-left:auto;font-size:28px;padding:4px"></button></div><div id="l"></div><div style="height:80px"></div><button class="fab" id="srt"></button>`;
+  const rd=readSet(),fv=favGet();let only=!!FILTER[book];
+  app.innerHTML=`<div class="top"><button class="back" id="bk">←</button><h2>${esc(book)}</h2><button class="back" id="srt" style="margin-left:auto;font-size:15px"></button></div><div id="l"></div><div style="height:80px"></div><button class="fab favfab" id="fo"></button>`;
   document.getElementById('bk').onclick=()=>back({n:'front'});
   const l=document.getElementById('l'),sb=document.getElementById('srt'),fo=document.getElementById('fo');
   const draw=()=>{
@@ -371,7 +373,7 @@ function chapters(book,all){
     });
   };
   sb.onclick=()=>{sortDesc=!sortDesc;try{localStorage.setItem('sortDesc',sortDesc?'1':'0')}catch(e){}draw();};
-  fo.onclick=()=>{only=!only;draw();};
+  fo.onclick=()=>{only=!only;FILTER[book]=only;draw();};
   draw();
 }
 function reader(c,book,all){
