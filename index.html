@@ -42,6 +42,21 @@ label{font-size:14px;color:var(--sub)}
 .big.ok{background:var(--ok)}
 .star{color:#f0b429}
 .btns{display:flex;gap:6px}
+.itl{display:flex;align-items:center;gap:8px;min-width:0;flex:1}
+.tt{white-space:nowrap;flex:none}
+.nt{flex:1;min-width:0;overflow:hidden;color:#999;font-size:14px;white-space:nowrap}
+.ntin{display:inline-block;white-space:nowrap}
+.ntin.mq{animation:mq linear infinite}
+.ntin .gap{display:inline-block;width:2em}
+.rt{flex:none;margin-left:8px}
+@keyframes mq{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+@media (prefers-reduced-motion:reduce){.ntin.mq{animation:none}}
+.pen{background:none;color:#c9b99f;padding:2px;font-size:24px;line-height:1;display:flex}
+.pen.on{color:var(--accent)}
+.ov{position:fixed;inset:0;background:rgba(60,50,40,.35);display:flex;align-items:center;justify-content:center;z-index:20;padding:16px}
+.ov .box{background:#fff;border-radius:14px;padding:16px;width:100%;max-width:420px}
+.ov textarea{width:100%;height:90px;border:1px solid var(--line);border-radius:10px;padding:10px;font:inherit;resize:none;color:var(--ink);background:#fff;margin:6px 0}
+.ov .ra{display:flex;gap:8px;justify-content:flex-end}
 .fab.favfab{background:#fff;border:1px solid var(--line);color:#c9b99f;font-size:28px;display:flex;align-items:center;justify-content:center}
 .fab.favfab.on{color:#f0b429}
 .chk{display:flex;align-items:center;gap:8px;color:var(--ink);font-size:15px;margin:6px 0}
@@ -74,8 +89,10 @@ const pending=new Set();let lastSt=0;
 async function stPush(ids){
   ids.forEach(id=>pending.add(id));
   try{
-    const rows=ids.map(id=>({chapter_id:id,fav:!!(ST[id]&&ST[id].fav),done:!!(ST[id]&&ST[id].done)}));
-    const r=await fetch(S,{method:'POST',headers:{...HDR,Prefer:'resolution=merge-duplicates,return=minimal'},body:JSON.stringify(rows)});
+    const rows=ids.map(id=>({chapter_id:id,fav:!!(ST[id]&&ST[id].fav),done:!!(ST[id]&&ST[id].done),note:(ST[id]&&ST[id].note)||''}));
+    const post=b=>fetch(S,{method:'POST',headers:{...HDR,Prefer:'resolution=merge-duplicates,return=minimal'},body:JSON.stringify(b)});
+    let r=await post(rows);
+    if(r.status===400)r=await post(rows.map(({note,...x})=>x)); // 尚未建立 note 欄位時的備援
     if(!r.ok)throw new Error(r.status);
     ids.forEach(id=>pending.delete(id));return true;
   }catch(e){console.error(e);return false;}
@@ -85,7 +102,7 @@ async function stLoad(force){
   try{
     const r=await fetch(S+'?select=*',{headers:HDR});
     if(!r.ok)throw new Error(r.status);
-    const m={};(await r.json()).forEach(x=>m[x.chapter_id]={fav:x.fav,done:x.done});
+    const m={};(await r.json()).forEach(x=>m[x.chapter_id]={fav:x.fav,done:x.done,note:x.note||''});
     pending.forEach(id=>{if(ST[id])m[id]=ST[id];});
     ST=m;stSave();lastSt=Date.now();
     if(pending.size)stPush([...pending]);
@@ -164,6 +181,19 @@ async function migrate(all){
   }catch(e){}
 }
 const STAR=on=>`<svg class="sv" viewBox="0 0 24 24"><path d="M12 3.2l2.6 5.4 5.9.8-4.3 4.1 1 5.9L12 16.6l-5.2 2.8 1-5.9-4.3-4.1 5.9-.8z" fill="${on?'currentColor':'none'}" stroke="currentColor" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/></svg>`;
+const PEN=`<svg class="sv" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"><path d="M4 20l1-4L16.5 4.5a2.1 2.1 0 0 1 3 3L8 19l-4 1z"/><path d="M14.5 6.5l3 3"/></svg>`;
+const noteGet=id=>(ST[id]&&ST[id].note)||'';
+function openNote(id,done){
+  const old=document.getElementById('nm');if(old)old.remove();
+  const o=document.createElement('div');o.className='ov';o.id='nm';
+  o.innerHTML=`<div class="box"><label>備註（會顯示在話數列表）</label><textarea id="ntx" maxlength="200" placeholder="輸入備註"></textarea><div class="ra"><button class="ghost" id="nc">取消</button><button id="ns">儲存</button></div></div>`;
+  document.body.appendChild(o);
+  const ta=o.querySelector('#ntx');ta.value=noteGet(id);ta.focus();
+  const close=()=>o.remove();
+  o.onclick=e=>{if(e.target===o)close();};
+  o.querySelector('#nc').onclick=close;
+  o.querySelector('#ns').onclick=()=>{const v=ta.value.trim();ST[id]={...(ST[id]||{}),note:v};stSave();stPush([id]);close();if(done)done();};
+}
 let sortDesc=false;try{sortDesc=localStorage.getItem('sortDesc')==='1'}catch(e){}
 
 // ===== 簡易淨化：只保留文字格式 =====
@@ -202,6 +232,7 @@ const sortEp=(a,b)=>{
 let ALL=[],histOK=true,NAV=0;const OPEN=new Set(),KEEP={on:false,book:''},FILTER={};
 const show=v=>{
   NAV++;
+  const m=document.getElementById('nm');if(m)m.remove();
   if(v.n==='admin')admin();
   else if(v.n==='front')front();
   else if(v.n==='chapters'&&ALL.length)chapters(v.book,ALL);
@@ -368,8 +399,17 @@ function chapters(book,all){
     arr.forEach(c=>{
       const done=rd.includes(c.id);
       const d=document.createElement('div');d.className='item'+(done?' read':'');
-      d.innerHTML=`<span>第 ${esc(c.ep)} 話${fv.includes(c.id)?' <span class="star">'+STAR(true)+'</span>':''}</span><span>${done?'✓ 已讀':'›'}</span>`;
+      const nt=noteGet(c.id);
+      d.innerHTML=`<span class="itl"><span class="tt">第 ${esc(c.ep)} 話${fv.includes(c.id)?' <span class="star">'+STAR(true)+'</span>':''}</span>${nt?`<span class="nt"><span class="ntin">${esc(nt)}</span></span>`:''}</span><span class="rt">${done?'✓ 已讀':'›'}</span>`;
       d.onclick=()=>go({n:'reader',book,id:c.id});l.appendChild(d);
+    });
+    l.querySelectorAll('.nt').forEach(el=>{
+      const n=el.firstElementChild,txt=n.textContent;
+      if(n.scrollWidth>el.clientWidth+1){
+        n.innerHTML=esc(txt)+'<span class="gap"></span>'+esc(txt)+'<span class="gap"></span>';
+        n.classList.add('mq');
+        n.style.animationDuration=Math.max(6,Math.round(n.scrollWidth/2/35))+'s';
+      }
     });
   };
   sb.onclick=()=>{sortDesc=!sortDesc;try{localStorage.setItem('sortDesc',sortDesc?'1':'0')}catch(e){}draw();};
@@ -380,9 +420,13 @@ function reader(c,book,all){
   const t=NAV;
   app.innerHTML=`<div class="top"><button class="back" id="bk">←</button><h2>${esc(book)} 第 ${esc(c.ep)} 話</h2></div>
   <div class="content" id="ct">載入中…</div><button class="big" id="done">閱讀完畢</button><button class="big" id="next" style="margin-top:0">下一話 →</button><div class="err" id="nmsg" style="text-align:center"></div><div style="height:56px"></div>
-  <div class="bar"><span></span><button class="circ" id="bk2">←</button><span class="no">第 ${esc(c.ep)} 話<button class="starbtn" id="fav"></button></span></div>`;
+  <div class="bar"><span><button class="pen" id="pn" title="備註">${PEN}</button></span><button class="circ" id="bk2">←</button><span class="no">第 ${esc(c.ep)} 話<button class="starbtn" id="fav"></button></span></div>`;
   document.getElementById('bk').onclick=()=>back({n:'chapters',book});
   document.getElementById('bk2').onclick=()=>back({n:'chapters',book});
+  const pb=document.getElementById('pn');
+  const setPen=()=>pb.classList.toggle('on',!!noteGet(c.id));
+  setPen();
+  pb.onclick=()=>openNote(c.id,setPen);
   const fb=document.getElementById('fav');
   const setFav=on=>{fb.innerHTML=STAR(on);fb.classList.toggle('on',on);};
   setFav(favGet().includes(c.id));
