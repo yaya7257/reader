@@ -83,69 +83,117 @@ const HDR={apikey:SUPABASE_KEY,'Content-Type':'application/json'};
 if(SUPABASE_KEY.startsWith('eyJ'))HDR.Authorization='Bearer '+SUPABASE_KEY; // 舊版 anon key 才需要
 const T=SUPABASE_URL+'/rest/v1/chapters';
 const S=SUPABASE_URL+'/rest/v1/reader_state';
+const ftimeout=(u,o={},ms=12000)=>{const c=new AbortController(),tm=setTimeout(()=>c.abort(),ms);return fetch(u,{...o,signal:c.signal}).finally(()=>clearTimeout(tm));};
 let ST={};try{ST=JSON.parse(localStorage.getItem('stCache')||'{}')}catch(e){}
 const stSave=()=>{try{localStorage.setItem('stCache',JSON.stringify(ST))}catch(e){}};
-const pending=new Set();let lastSt=0;
-async function stPush(ids){
-  ids.forEach(id=>pending.add(id));
-  try{
-    const rows=ids.map(id=>({chapter_id:id,fav:!!(ST[id]&&ST[id].fav),done:!!(ST[id]&&ST[id].done),note:(ST[id]&&ST[id].note)||''}));
-    const post=b=>fetch(S,{method:'POST',headers:{...HDR,Prefer:'resolution=merge-duplicates,return=minimal'},body:JSON.stringify(b)});
-    let r=await post(rows);
-    if(r.status===400)r=await post(rows.map(({note,...x})=>x)); // 尚未建立 note 欄位時的備援
-    if(!r.ok)throw new Error(r.status);
-    ids.forEach(id=>pending.delete(id));return true;
-  }catch(e){console.error(e);return false;}
+// PEND：尚未成功送到雲端的欄位（存在本機，重新開啟網頁也會繼續重試）；TOUCH：本次開啟後本機改過的時間
+let PEND={};try{PEND=JSON.parse(localStorage.getItem('stPend')||'{}')}catch(e){}
+const pendSave=()=>{try{localStorage.setItem('stPend',JSON.stringify(PEND))}catch(e){}};
+const TOUCH={};let lastSt=0,noteOk=true,flushing=false,again=false,flushP=null;
+async function sendItems(items){
+  const rows=items.map(({id,fs})=>{const r={chapter_id:id};fs.forEach(k=>{r[k]=k==='note'?((ST[id]&&ST[id].note)||''):!!(ST[id]&&ST[id][k]);});return r;});
+  let r;
+  try{r=await ftimeout(S,{method:'POST',headers:{...HDR,Prefer:'resolution=merge-duplicates,return=minimal'},body:JSON.stringify(rows)});}
+  catch(e){return false;}
+  if(r.ok){
+    items.forEach(({id,fs},i)=>{fs.forEach(k=>{if(PEND[id]&&rows[i][k]===(k==='note'?((ST[id]&&ST[id].note)||''):!!(ST[id]&&ST[id][k])))delete PEND[id][k];});if(PEND[id]&&!Object.keys(PEND[id]).length)delete PEND[id];});
+    return true;
+  }
+  if(r.status===409){ // 話數已不存在（外鍵不成立），永遠送不出去，放棄
+    if(items.length>1){let ok=true;for(const it of items)ok=(await sendItems([it]))&&ok;return ok;}
+    delete PEND[items[0].id];return true;
+  }
+  if(r.status===400&&items[0].fs.includes('note')&&noteOk){noteOk=false;again=true;}
+  return false;
+}
+function stFlush(){
+  if(flushing){again=true;return flushP;}
+  flushing=true;
+  flushP=(async()=>{
+    let ok=true;
+    try{
+      do{
+        again=false;ok=true;
+        const groups={};
+        Object.keys(PEND).forEach(id=>{
+          const fs=Object.keys(PEND[id]).filter(k=>k!=='note'||noteOk);
+          if(fs.length)(groups[fs.slice().sort().join(',')]=groups[fs.slice().sort().join(',')]||[]).push({id,fs});
+        });
+        for(const k in groups)ok=(await sendItems(groups[k]))&&ok;
+        pendSave();
+      }while(again);
+    }finally{flushing=false;}
+    return ok;
+  })();
+  return flushP;
 }
 async function stLoad(force){
   if(!force&&Date.now()-lastSt<ST_TTL)return;
+  const t0=Date.now();
   try{
-    const r=await fetch(S+'?select=*',{headers:HDR});
+    const r=await ftimeout(S+'?select=*',{headers:HDR});
     if(!r.ok)throw new Error(r.status);
-    const m={};(await r.json()).forEach(x=>m[x.chapter_id]={fav:x.fav,done:x.done,note:x.note||''});
-    pending.forEach(id=>{if(ST[id])m[id]=ST[id];});
+    const cloud={};(await r.json()).forEach(x=>{cloud[x.chapter_id]=x;});
+    const known=new Set((cacheGet()||[]).map(c=>c.id));
+    const m={};let heal=false;
+    new Set([...Object.keys(cloud),...Object.keys(ST)]).forEach(id=>{
+      const c=cloud[id],l=ST[id]||{},p=PEND[id]||{},keep=(TOUCH[id]||0)>=t0;
+      const pick=k=>(p[k]||keep)?l[k]:((c&&c[k]!==undefined&&c[k]!==null)?c[k]:l[k]);
+      const e={fav:!!pick('fav'),done:!!pick('done')||!!l.done,note:pick('note')||''};
+      if(known.size&&!c&&!p.fav&&!p.done&&!p.note&&!known.has(id))return; // 已不存在的話數
+      if(known.size&&known.has(id)){
+        if(e.done&&!(c&&c.done)){PEND[id]={...(PEND[id]||{}),done:1};heal=true;}
+        if(!c){
+          if(e.fav){PEND[id]={...(PEND[id]||{}),fav:1};heal=true;}
+          if(e.note){PEND[id]={...(PEND[id]||{}),note:1};heal=true;}
+        }
+      }
+      m[id]=e;
+    });
     ST=m;stSave();lastSt=Date.now();
-    if(pending.size)stPush([...pending]);
+    if(heal){pendSave();stFlush();}
   }catch(e){console.error(e);}
 }
-// 省流量設定：書單 10 分鐘內不重抓、狀態 30 秒內不重抓；內文只在點開時抓，並依「修改時間」判斷是否需要更新
-const LIST_TTL=10*60*1000,ST_TTL=30*1000,NOVER_TTL=3600*1000;
+// 省流量設定：書單 2 分鐘內不重抓、狀態 30 秒內不重抓；內文只在點開時抓，並依「修改時間」判斷是否需要更新
+const LIST_TTL=2*60*1000,ST_TTL=30*1000,NOVER_TTL=3600*1000;
 const meta=o=>{const m={...o};delete m.html;return m;};
 const cacheGet=()=>{try{return JSON.parse(localStorage.getItem('chCache')||'null');}catch(e){return null;}};
 const cacheSet=l=>{try{localStorage.setItem('chCache',JSON.stringify(l));}catch(e){}};
 const hGet=id=>{try{return JSON.parse(localStorage.getItem('h:'+id)||'null');}catch(e){return null;}};
 const hSet=(id,h,v)=>{try{localStorage.setItem('h:'+id,JSON.stringify({h,t:Date.now(),v:v||null}));}catch(e){}};
-const hOk=(x,v)=>!!x&&(v?(x.v===v||(!x.v&&Date.now()-x.t<NOVER_TTL)):Date.now()-x.t<NOVER_TTL);
+const hOk=(x,v)=>!!x&&!!x.h&&(v?(x.v===v||(!x.v&&Date.now()-x.t<NOVER_TTL)):Date.now()-x.t<NOVER_TTL);
 const db={
+  err:null,
   async list(force){
     const c=cacheGet(),tm=+(localStorage.getItem('chTime')||0);
-    if(!force&&c&&Date.now()-tm<LIST_TTL)return c;
+    if(!force&&c&&c.length&&Date.now()-tm<LIST_TTL)return c;
     try{
-      const q=cols=>fetch(T+'?select='+cols+'&order=created_at.asc',{headers:HDR});
+      const q=cols=>ftimeout(T+'?select='+cols+'&order=created_at.asc',{headers:HDR});
       let r=await q('id,book,ep,created_at,updated_at');
       if(r.status===400)r=await q('id,book,ep,created_at'); // 尚未建立 updated_at 欄位時的備援
       if(!r.ok)throw new Error(r.status);
-      const l=await r.json();cacheSet(l);
+      const l=await r.json();cacheSet(l);db.err=null;
       try{localStorage.setItem('chTime',String(Date.now()));}catch(e){}return l;}
-    catch(e){console.error(e);return c||[];}
+    catch(e){console.error(e);db.err=String(e.message||e);return c||[];}
   },
   async html(id){
     const cur=(cacheGet()||[]).find(c=>c.id===id),v=cur&&cur.updated_at,x=hGet(id);
     if(hOk(x,v))return x.h;
-    try{const r=await fetch(T+'?id=eq.'+encodeURIComponent(id)+'&select=html',{headers:HDR});
+    try{const r=await ftimeout(T+'?id=eq.'+encodeURIComponent(id)+'&select=html',{headers:HDR});
       if(!r.ok)throw new Error(r.status);const a=await r.json();
-      const h=a[0]?a[0].html:'';hSet(id,h,v);return h;}
-    catch(e){console.error(e);return x?x.h:null;}
+      if(!a.length||!a[0].html)return x&&x.h?x.h:null; // 抓不到就不要存空內容
+      hSet(id,a[0].html,v);return a[0].html;}
+    catch(e){console.error(e);return x&&x.h?x.h:null;}
   },
   async add(item){
-    try{const r=await fetch(T,{method:'POST',headers:{...HDR,Prefer:'return=minimal'},body:JSON.stringify(item)});
+    try{const r=await ftimeout(T,{method:'POST',headers:{...HDR,Prefer:'return=minimal'},body:JSON.stringify(item)});
       if(!r.ok)throw new Error(r.status);
       cacheSet([...(cacheGet()||[]),meta(item)]);hSet(item.id,item.html,null);}
     catch(e){console.error(e);alert('儲存失敗');}
   },
   async update(id,f){
     try{
-      const p=sel=>fetch(T+'?id=eq.'+encodeURIComponent(id)+'&select='+sel,{method:'PATCH',headers:{...HDR,Prefer:'return=representation'},body:JSON.stringify(f)});
+      const p=sel=>ftimeout(T+'?id=eq.'+encodeURIComponent(id)+'&select='+sel,{method:'PATCH',headers:{...HDR,Prefer:'return=representation'},body:JSON.stringify(f)});
       let r=await p('id,updated_at');
       if(r.status===400)r=await p('id');
       if(!r.ok)throw new Error(r.status);
@@ -157,7 +205,7 @@ const db={
     catch(e){console.error(e);return false;}
   },
   async remove(id){
-    try{const r=await fetch(T+'?id=eq.'+encodeURIComponent(id),{method:'DELETE',headers:HDR});
+    try{const r=await ftimeout(T+'?id=eq.'+encodeURIComponent(id),{method:'DELETE',headers:HDR});
       if(!r.ok)throw new Error(r.status);
       cacheSet((cacheGet()||[]).filter(c=>c.id!==id));
       try{localStorage.removeItem('h:'+id);}catch(e){}}
@@ -166,17 +214,20 @@ const db={
 };
 // ===== 已讀狀態（每位讀者各自記錄）=====
 const readSet=()=>Object.keys(ST).filter(k=>ST[k].done);
-const markRead=id=>{ST[id]={...(ST[id]||{}),done:true};stSave();stPush([id]);};
+const stMark=(id,patch)=>{ST[id]={...(ST[id]||{}),...patch};PEND[id]={...(PEND[id]||{})};Object.keys(patch).forEach(k=>{PEND[id][k]=1;});TOUCH[id]=Date.now();};
+const stSet=(id,patch)=>{stMark(id,patch);stSave();pendSave();return stFlush();};
+const markRead=id=>stSet(id,{done:true});
 const favGet=()=>Object.keys(ST).filter(k=>ST[k].fav);
-const favToggle=id=>{const on=!(ST[id]&&ST[id].fav);ST[id]={...(ST[id]||{}),fav:on};stSave();stPush([id]);return on;};
+const favToggle=id=>{const on=!(ST[id]&&ST[id].fav);stSet(id,{fav:on});return on;};
 // 一次性：把這台裝置舊的本機「已讀／最愛」搬到雲端
 async function migrate(all){
   try{
     if(localStorage.getItem('stMigrated')||!all.length)return;
-    const ids=new Set(all.map(c=>c.id)),ch=new Set();
-    JSON.parse(localStorage.getItem('readDone')||'[]').forEach(id=>{if(ids.has(id)){ST[id]={...(ST[id]||{}),done:true};ch.add(id);}});
-    JSON.parse(localStorage.getItem('favs')||'[]').forEach(id=>{if(ids.has(id)){ST[id]={...(ST[id]||{}),fav:true};ch.add(id);}});
-    if(ch.size){stSave();if(!(await stPush([...ch])))return;}
+    const ids=new Set(all.map(c=>c.id));
+    JSON.parse(localStorage.getItem('readDone')||'[]').forEach(id=>{if(ids.has(id))stMark(id,{done:true});});
+    JSON.parse(localStorage.getItem('favs')||'[]').forEach(id=>{if(ids.has(id))stMark(id,{fav:true});});
+    stSave();pendSave();
+    await stFlush();
     localStorage.setItem('stMigrated','1');
   }catch(e){}
 }
@@ -192,8 +243,9 @@ function openNote(id,done){
   const close=()=>o.remove();
   o.onclick=e=>{if(e.target===o)close();};
   o.querySelector('#nc').onclick=close;
-  o.querySelector('#ns').onclick=()=>{const v=ta.value.trim();ST[id]={...(ST[id]||{}),note:v};stSave();stPush([id]);close();if(done)done();};
+  o.querySelector('#ns').onclick=()=>{const v=ta.value.trim();stSet(id,{note:v});close();if(done)done();};
 }
+const errBanner=()=>`<div class="err" style="text-align:center">⚠ 無法連線到雲端（${esc(db.err)}），目前顯示的是上次的資料</div>`;
 let sortDesc=false;try{sortDesc=localStorage.getItem('sortDesc')==='1'}catch(e){}
 
 // ===== 簡易淨化：只保留文字格式 =====
@@ -229,9 +281,9 @@ const sortEp=(a,b)=>{
 };
 
 // ===== 頁面導覽（讓手機系統的「上一頁」對應網頁內的上一頁）=====
-let ALL=[],histOK=true,NAV=0;const OPEN=new Set(),KEEP={on:false,book:''},FILTER={};
+let ALL=[],histOK=true,NAV=0,FRESH=false,CUR=null;const OPEN=new Set(),KEEP={on:false,book:''},FILTER={};
 const show=v=>{
-  NAV++;
+  NAV++;CUR=v;
   const m=document.getElementById('nm');if(m)m.remove();
   if(v.n==='admin')admin();
   else if(v.n==='front')front();
@@ -253,7 +305,7 @@ function login(){
   <div class="err" id="err"></div><button id="go">進入</button></div>`;
   const enter=()=>{
     const v=document.getElementById('pw').value;
-    if(v==='7777')go({n:'admin'});else if(v==='9999')go({n:'front'});
+    if(v==='7777')go({n:'admin'});else if(v==='9999'){FRESH=true;go({n:'front'});}
     else{document.getElementById('err').textContent='密碼錯誤';}
   };
   document.getElementById('go').onclick=enter;
@@ -355,8 +407,8 @@ async function admin(){
   const kp=document.getElementById('keep');kp.checked=KEEP.on;kp.onchange=()=>{KEEP.on=kp.checked;};
   if(KEEP.on&&KEEP.book&&[...sel.options].some(o=>o.value===KEEP.book)){sel.value=KEEP.book;cus.classList.add('hide');document.getElementById('ep').focus();}
   const t=NAV;
-  const all=await db.list();
-  if(t===NAV)fill(all);else ALL=all;
+  const all=await db.list(true);
+  if(t===NAV){fill(all);if(db.err)lib.insertAdjacentHTML('afterbegin',errBanner());}else ALL=all;
 }
 
 // ===== 前台 =====
@@ -376,11 +428,11 @@ function renderFront(all,loading){
   });
 }
 async function front(){
-  const c=cacheGet(),t=NAV;
+  const c=cacheGet(),t=NAV,force=FRESH;FRESH=false;
   renderFront(c||[],!c);
-  const [all]=await Promise.all([db.list(),stLoad()]);
+  const [all]=await Promise.all([db.list(force),stLoad(force)]);
   migrate(all);
-  if(t===NAV)renderFront(all);else ALL=all;
+  if(t===NAV){renderFront(all);if(db.err)document.getElementById('l').insertAdjacentHTML('afterbegin',errBanner());}else ALL=all;
 }
 
 function chapters(book,all){
@@ -415,6 +467,8 @@ function chapters(book,all){
   sb.onclick=()=>{sortDesc=!sortDesc;try{localStorage.setItem('sortDesc',sortDesc?'1':'0')}catch(e){}draw();};
   fo.onclick=()=>{only=!only;FILTER[book]=only;draw();};
   draw();
+  const t=NAV,sig=a=>a.map(x=>x.id+'|'+(x.updated_at||'')).join();
+  db.list().then(fresh=>{if(t===NAV&&sig(fresh)!==sig(all)){ALL=fresh;chapters(book,fresh);}});
 }
 function reader(c,book,all){
   const t=NAV;
@@ -438,12 +492,15 @@ function reader(c,book,all){
   const dn=document.getElementById('done');
   const setDone=()=>{dn.textContent='已閱讀完畢 ✓';dn.classList.add('ok');};
   if(readSet().includes(c.id))setDone();
-  dn.onclick=()=>{markRead(c.id);setDone();};
-  db.html(c.id).then(h=>{const el=document.getElementById('ct');if(el&&t===NAV)el.innerHTML=h===null?'讀取失敗，請稍後再試':clean(h);});
+  dn.onclick=()=>{setDone();markRead(c.id).then(ok=>{if(!ok){const m=document.getElementById('nmsg');if(m&&t===NAV)m.textContent='⚠ 已讀狀態尚未同步到雲端，稍後會自動重試';}});};
+  db.html(c.id).then(h=>{const el=document.getElementById('ct');if(el&&t===NAV){if(h===null){el.innerHTML='<div class="muted">讀取失敗 <button class="ghost" id="rt">重試</button></div>';document.getElementById('rt').onclick=()=>reader(c,book,all);}else el.innerHTML=clean(h);}});
   window.scrollTo(0,0);
 }
 try{history.replaceState({n:'login'},'');}catch(e){histOK=false;}
 Promise.all([db.list(),stLoad()]); // 預先載入，進入前後台時就不用等
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'){stFlush();if(CUR&&(CUR.n==='front'||CUR.n==='chapters'))show(CUR);}});
+window.addEventListener('online',()=>{stFlush();});
+stFlush();
 login();
 </script>
 </body>
