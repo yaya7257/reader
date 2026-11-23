@@ -82,13 +82,26 @@ const SUPABASE_KEY='sb_publishable_CEHe6bg9d9xw6tbP2SHG1A_FSp1CKUf';
 const HDR={apikey:SUPABASE_KEY,'Content-Type':'application/json'};
 if(SUPABASE_KEY.startsWith('eyJ'))HDR.Authorization='Bearer '+SUPABASE_KEY; // 舊版 anon key 才需要
 const T=SUPABASE_URL+'/rest/v1/chapters';
+// 寫入本機儲存；空間不足時先刪掉最舊的內文快取再重試
+const lsSet=(k,v)=>{
+  for(let i=0;i<3;i++){
+    try{localStorage.setItem(k,v);return true;}
+    catch(e){
+      const ks=[];
+      for(let j=0;j<localStorage.length;j++){const n=localStorage.key(j);if(n&&n.startsWith('h:')&&n!==k){let t=0;try{t=JSON.parse(localStorage.getItem(n)).t||0;}catch(e2){}ks.push([t,n]);}}
+      if(!ks.length)return false;
+      ks.sort((a,b)=>a[0]-b[0]).slice(0,Math.max(5,Math.ceil(ks.length/4))).forEach(x=>localStorage.removeItem(x[1]));
+    }
+  }
+  return false;
+};
 const S=SUPABASE_URL+'/rest/v1/reader_state';
 const ftimeout=(u,o={},ms=12000)=>{const c=new AbortController(),tm=setTimeout(()=>c.abort(),ms);return fetch(u,{...o,signal:c.signal}).finally(()=>clearTimeout(tm));};
 let ST={};try{ST=JSON.parse(localStorage.getItem('stCache')||'{}')}catch(e){}
-const stSave=()=>{try{localStorage.setItem('stCache',JSON.stringify(ST))}catch(e){}};
+const stSave=()=>{lsSet('stCache',JSON.stringify(ST));};
 // PEND：尚未成功送到雲端的欄位（存在本機，重新開啟網頁也會繼續重試）；TOUCH：本次開啟後本機改過的時間
 let PEND={};try{PEND=JSON.parse(localStorage.getItem('stPend')||'{}')}catch(e){}
-const pendSave=()=>{try{localStorage.setItem('stPend',JSON.stringify(PEND))}catch(e){}};
+const pendSave=()=>{lsSet('stPend',JSON.stringify(PEND));};
 const TOUCH={};let lastSt=0,noteOk=true,flushing=false,again=false,flushP=null;
 async function sendItems(items){
   const rows=items.map(({id,fs})=>{const r={chapter_id:id};fs.forEach(k=>{r[k]=k==='note'?((ST[id]&&ST[id].note)||''):!!(ST[id]&&ST[id][k]);});return r;});
@@ -158,9 +171,9 @@ async function stLoad(force){
 const LIST_TTL=2*60*1000,ST_TTL=30*1000,NOVER_TTL=3600*1000;
 const meta=o=>{const m={...o};delete m.html;return m;};
 const cacheGet=()=>{try{return JSON.parse(localStorage.getItem('chCache')||'null');}catch(e){return null;}};
-const cacheSet=l=>{try{localStorage.setItem('chCache',JSON.stringify(l));}catch(e){}};
+const cacheSet=l=>{lsSet('chCache',JSON.stringify(l));};
 const hGet=id=>{try{return JSON.parse(localStorage.getItem('h:'+id)||'null');}catch(e){return null;}};
-const hSet=(id,h,v)=>{try{localStorage.setItem('h:'+id,JSON.stringify({h,t:Date.now(),v:v||null}));}catch(e){}};
+const hSet=(id,h,v)=>{lsSet('h:'+id,JSON.stringify({h,t:Date.now(),v:v||null}));};
 const hOk=(x,v)=>!!x&&!!x.h&&(v?(x.v===v||(!x.v&&Date.now()-x.t<NOVER_TTL)):Date.now()-x.t<NOVER_TTL);
 const db={
   err:null,
@@ -186,14 +199,16 @@ const db={
     catch(e){console.error(e);return x&&x.h?x.h:null;}
   },
   async add(item){
-    try{const r=await ftimeout(T,{method:'POST',headers:{...HDR,Prefer:'return=minimal'},body:JSON.stringify(item)});
-      if(!r.ok)throw new Error(r.status);
-      cacheSet([...(cacheGet()||[]),meta(item)]);hSet(item.id,item.html,null);}
-    catch(e){console.error(e);alert('儲存失敗');}
+    try{const r=await ftimeout(T,{method:'POST',headers:{...HDR,Prefer:'return=minimal'},body:JSON.stringify(item)},30000);
+      if(!r.ok&&r.status!==409)throw new Error(r.status); // 409：先前那次其實已經成功，視為成功
+      const c=cacheGet()||[];
+      if(!c.some(x=>x.id===item.id))cacheSet([...c,meta(item)]);
+      hSet(item.id,item.html,null);return true;}
+    catch(e){console.error(e);return false;}
   },
   async update(id,f){
     try{
-      const p=sel=>ftimeout(T+'?id=eq.'+encodeURIComponent(id)+'&select='+sel,{method:'PATCH',headers:{...HDR,Prefer:'return=representation'},body:JSON.stringify(f)});
+      const p=sel=>ftimeout(T+'?id=eq.'+encodeURIComponent(id)+'&select='+sel,{method:'PATCH',headers:{...HDR,Prefer:'return=representation'},body:JSON.stringify(f)},30000);
       let r=await p('id,updated_at');
       if(r.status===400)r=await p('id');
       if(!r.ok)throw new Error(r.status);
@@ -273,12 +288,18 @@ function clean(html){
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const app=document.getElementById('app');
 const epNum=c=>{const m=String(c.ep).match(/\d+(\.\d+)?/);return m?parseFloat(m[0]):NaN;};
+// 分組：一般數字話數 → 外傳 → 其他。外傳之間依「外傳」後面的數字排序
+const epGrp=c=>/^\s*外傳/.test(c.ep)?1:(isNaN(epNum(c))?2:0);
 const sortEp=(a,b)=>{
+  const ga=epGrp(a),gb=epGrp(b);
+  if(ga!==gb)return ga-gb;
   const x=epNum(a),y=epNum(b);
   if(!isNaN(x)&&!isNaN(y)&&x!==y)return x-y;
-  if(isNaN(x)!==isNaN(y))return isNaN(x)?1:-1;
+  if(isNaN(x)!==isNaN(y))return isNaN(x)?-1:1;
   return String(a.ep).localeCompare(String(b.ep),'zh',{numeric:true});
 };
+// 顯示名稱：純數字顯示「第 N 話」，其他（例如外傳1）直接顯示原名稱
+const epLabel=ep=>/^[\d.\-\s]+$/.test(String(ep))?'第 '+String(ep).trim()+' 話':String(ep);
 
 // ===== 頁面導覽（讓手機系統的「上一頁」對應網頁內的上一頁）=====
 let ALL=[],histOK=true,NAV=0,FRESH=false,CUR=null;const OPEN=new Set(),KEEP={on:false,book:''},FILTER={};
@@ -345,7 +366,7 @@ async function admin(){
       const body=document.createElement('div');body.className='bbody';
       list.forEach(c=>{
         const r=document.createElement('div');r.className='row';
-        r.innerHTML=`<span>第 ${esc(c.ep)} 話</span><span class="btns"><button class="edit">編輯</button><button class="del">刪除</button></span>`;
+        r.innerHTML=`<span>${esc(epLabel(c.ep))}</span><span class="btns"><button class="edit">編輯</button><button class="del">刪除</button></span>`;
         r.querySelector('.edit').onclick=()=>startEdit(c);
         const btn=r.querySelector('.del');let armed=false;
         btn.onclick=async()=>{
@@ -366,7 +387,12 @@ async function admin(){
       lib.appendChild(card);
     });
   };
-  let editId=null;
+  let editId=null,pend=null;
+  const genId=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+  const applyKeep=()=>{
+    if(!(KEEP.on&&KEEP.book)||editId)return;
+    if(sel.value==='__custom'&&!cus.value.trim()&&[...sel.options].some(o=>o.value===KEEP.book)){sel.value=KEEP.book;cus.classList.add('hide');}
+  };
   const addBtn=document.getElementById('add'),cancelBtn=document.getElementById('cancel');
   const startEdit=async c=>{
     const h=await db.html(c.id);
@@ -374,10 +400,10 @@ async function admin(){
     editId=c.id;
     sel.value=c.book;cus.classList.toggle('hide',sel.value!=='__custom');
     document.getElementById('ep').value=c.ep;
-    document.getElementById('ep').disabled=true;sel.disabled=true;cus.disabled=true;
+    sel.disabled=true;cus.disabled=true;
     ed.innerHTML=clean(h);
     addBtn.textContent='儲存修改';cancelBtn.classList.remove('hide');
-    document.getElementById('msg').textContent='編輯中：'+c.book+' 第 '+c.ep+' 話';
+    document.getElementById('msg').textContent='編輯中：'+c.book+' '+epLabel(c.ep);
     window.scrollTo({top:0,behavior:'smooth'});
   };
   cancelBtn.onclick=()=>admin();
@@ -391,24 +417,39 @@ async function admin(){
     else document.execCommand('insertText',false,cd.getData('text/plain'));
   });
   document.getElementById('add').onclick=async()=>{
+    if(addBtn.disabled)return;
+    const msgEl=document.getElementById('msg');
     const book=(sel.value==='__custom'?cus.value:sel.value).trim();
     const ep=document.getElementById('ep').value.trim();
     const html=clean(ed.innerHTML).trim();
-    if(!book||!ep||!ed.textContent.trim()){document.getElementById('msg').textContent='請填寫書名、話數與內文';return;}
+    if(!book||!ep||!ed.textContent.trim()){msgEl.textContent='請填寫書名、話數與內文';return;}
+    const label=addBtn.textContent;
+    addBtn.disabled=true;addBtn.textContent='處理中…';msgEl.textContent='';
+    let ok;
     if(editId){
-      if(!(await db.update(editId,{html}))){document.getElementById('msg').textContent='修改失敗，請確認已在 Supabase 加上修改權限';return;}
-    }else{
-      await db.add({id:Date.now().toString(36)+Math.random().toString(36).slice(2,6),book,ep,html});
-      KEEP.on=document.getElementById('keep').checked;KEEP.book=book;
+      if(ALL.some(x=>x.book===book&&x.ep===ep&&x.id!==editId)){addBtn.disabled=false;addBtn.textContent=label;msgEl.textContent='這本書已經有相同名稱的話數';return;}
+      ok=await db.update(editId,{html,ep});
     }
-    admin();
+    else{
+      const sig=book+'|'+ep+'|'+html;
+      if(!pend||pend.sig!==sig)pend={sig,id:genId()}; // 同一份內容重試時沿用同一個 id，不會重複新增
+      ok=await db.add({id:pend.id,book,ep,html});
+    }
+    if(!ok){
+      addBtn.disabled=false;addBtn.textContent=label;
+      msgEl.textContent=editId?'修改失敗，請確認已在 Supabase 加上修改權限':'上傳失敗，內容已保留，請檢查網路後再按一次「新增」';
+      return;
+    }
+    if(!editId){KEEP.on=document.getElementById('keep').checked;KEEP.book=book;}
+    pend=null;admin();
   };
   fill(cacheGet()||[]);
   const kp=document.getElementById('keep');kp.checked=KEEP.on;kp.onchange=()=>{KEEP.on=kp.checked;};
-  if(KEEP.on&&KEEP.book&&[...sel.options].some(o=>o.value===KEEP.book)){sel.value=KEEP.book;cus.classList.add('hide');document.getElementById('ep').focus();}
+  applyKeep();
+  if(KEEP.on&&KEEP.book&&sel.value===KEEP.book)document.getElementById('ep').focus();
   const t=NAV;
   const all=await db.list(true);
-  if(t===NAV){fill(all);if(db.err)lib.insertAdjacentHTML('afterbegin',errBanner());}else ALL=all;
+  if(t===NAV){fill(all);applyKeep();if(db.err)lib.insertAdjacentHTML('afterbegin',errBanner());}else ALL=all;
 }
 
 // ===== 前台 =====
@@ -452,7 +493,7 @@ function chapters(book,all){
       const done=rd.includes(c.id);
       const d=document.createElement('div');d.className='item'+(done?' read':'');
       const nt=noteGet(c.id);
-      d.innerHTML=`<span class="itl"><span class="tt">第 ${esc(c.ep)} 話${fv.includes(c.id)?' <span class="star">'+STAR(true)+'</span>':''}</span>${nt?`<span class="nt"><span class="ntin">${esc(nt)}</span></span>`:''}</span><span class="rt">${done?'✓ 已讀':'›'}</span>`;
+      d.innerHTML=`<span class="itl"><span class="tt">${esc(epLabel(c.ep))}${fv.includes(c.id)?' <span class="star">'+STAR(true)+'</span>':''}</span>${nt?`<span class="nt"><span class="ntin">${esc(nt)}</span></span>`:''}</span><span class="rt">${done?'✓ 已讀':'›'}</span>`;
       d.onclick=()=>go({n:'reader',book,id:c.id});l.appendChild(d);
     });
     l.querySelectorAll('.nt').forEach(el=>{
@@ -472,9 +513,9 @@ function chapters(book,all){
 }
 function reader(c,book,all){
   const t=NAV;
-  app.innerHTML=`<div class="top"><button class="back" id="bk">←</button><h2>${esc(book)} 第 ${esc(c.ep)} 話</h2></div>
+  app.innerHTML=`<div class="top"><button class="back" id="bk">←</button><h2>${esc(book)} ${esc(epLabel(c.ep))}</h2></div>
   <div class="content" id="ct">載入中…</div><button class="big" id="done">閱讀完畢</button><button class="big" id="next" style="margin-top:0">下一話 →</button><div class="err" id="nmsg" style="text-align:center"></div><div style="height:56px"></div>
-  <div class="bar"><span><button class="pen" id="pn" title="備註">${PEN}</button></span><button class="circ" id="bk2">←</button><span class="no">第 ${esc(c.ep)} 話<button class="starbtn" id="fav"></button></span></div>`;
+  <div class="bar"><span><button class="pen" id="pn" title="備註">${PEN}</button></span><button class="circ" id="bk2">←</button><span class="no">${esc(epLabel(c.ep))}<button class="starbtn" id="fav"></button></span></div>`;
   document.getElementById('bk').onclick=()=>back({n:'chapters',book});
   document.getElementById('bk2').onclick=()=>back({n:'chapters',book});
   const pb=document.getElementById('pn');
